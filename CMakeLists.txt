@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.31.2)
 
 project(Paint VERSION 0.1)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/README.in.md
+  ${CMAKE_CURRENT_SOURCE_DIR}/README.md
+  @ONLY)
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}")
 set(CMAKE_DEBUG_POSTFIX d)
