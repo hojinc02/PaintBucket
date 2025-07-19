@@ -1,13 +1,12 @@
 #include "PaintWindow.h"
 
-#include "wx/affinematrix2d.h"
 #include "wx/dcbuffer.h"
 #include "wx/graphics.h"
 #include "wx/wx.h"
 
-#include "AffineImage.h"
 #include "Macros.h"
 #include "MathUtils.h"
+#include "ScaledImageDrawer.h"
 
 void logMatrix(wxAffineMatrix2D);
 void logRange(OffsetRange);
@@ -28,30 +27,33 @@ PaintWindow::PaintWindow(wxWindow *parent, const wxSize size)
 }
 
 PaintWindow::~PaintWindow() {
-  delete affineDrawer;
+  delete drawer;
 }
 
 void PaintWindow::Reset() {
   minScale = 0.;
-  drawRange = {0., 1., 0., 1.};
-  lastGrabbedOrigin = {0., 0.};
-  relativeX = 0.;
-  relativeY = 0.;
+  drawRange = {0, 1, 0, 1};
+  lastGrabbedOrigin = {0, 0};
+  relOffset.m_x = 0.;
+  relOffset.m_y = 0.;
   shouldDrag = false;
   shouldZoom = false;
+  interpolate = true;
   scale = 1.;
 
-  delete affineDrawer;
-  affineDrawer = nullptr;
+  delete drawer;
+  drawer = nullptr;
 }
 
 void PaintWindow::SetImage(wxImage &img) {
   LOG("SetImage()");
 
-  delete affineDrawer;
-  affineDrawer = new AffineImage(img);
+  delete drawer;
+  drawer = new ScaledImageDrawer(img, wxGraphicsRenderer::GetDefaultRenderer());
 
-  minScale = Ratio(MIN_LENGTH, std::max(img.GetSize().GetX(), img.GetSize().GetY()));
+  auto imgSize = img.GetSize();
+  int longerLength = std::max(imgSize.GetX(), imgSize.GetY());
+  minScale = Ratio(MIN_LENGTH, longerLength);
 
   LOG("minScale: %.4f", minScale);
 
@@ -62,43 +64,60 @@ void PaintWindow::CenterImage() {
   LOG("Center()");
   int winX = GetSize().GetX();
   int winY = GetSize().GetY();
-  int imgX = affineDrawer->width;
-  int imgY = affineDrawer->height;
+  int imgX = drawer->GetScaledSize().x;
+  int imgY = drawer->GetScaledSize().y;
 
-  affineDrawer->transform.Translate((winX - imgX) / 2, (winY - imgY) / 2);
+  drawOffset = {(winX - imgX) / 2, (winY - imgY) / 2};
+  updateRelOffset();
+
+  Refresh();
 }
 
 void PaintWindow::FitImage() {
-  LOG("Fit()");
-  /*
   int winX = GetSize().GetX();
   int winY = GetSize().GetY();
-  int imgX = imageDrawer->GetScaledSize().x;
-  int imgY = imageDrawer->GetScaledSize().y;
+  int imgX = drawer->GetScaledSize().x;
+  int imgY = drawer->GetScaledSize().y;
 
   double windowRatio = Ratio(winY, winX);
   double imgRatio = Ratio(imgY, imgX);
 
-  if (imgRatio < windowRatio) {
-    imageDrawer->ScaleToWidth(winX);
+  bool fitByWidth = imgRatio < windowRatio;
+  double fitScale = fitByWidth ? Ratio(winX, drawer->originalSize.GetX())
+                               : Ratio(winY, drawer->originalSize.GetY());
+
+  if (fitScale > MAX_SCALE) {
+    drawer->Scale(MAX_SCALE);
+    scale = MAX_SCALE;
+  } else if (fitByWidth) {
+    drawer->ScaleToWidth(winX);
+    scale = fitScale;
   } else {
-    imageDrawer->ScaleToHeight(winY);
+    drawer->ScaleToHeight(winY);
+    scale = fitScale;
   }
-    */
+
+  LOG("Fit() -- scale: %.3f", scale);
 
   updateMinOffset();
+
+  Refresh();
 }
 
 void PaintWindow::OnSize(wxSizeEvent &evt) {
   (void)evt;
   updateMaxOffset();
 
-  LOG("OnSize() -- win size:[%d,%d]  x:[%.1f,%.1f]  y:[%.1f,%.1f]  "
-      "relPos:[%.3f,%.3f]",
-      GetSize().GetX(), GetSize().GetY(), drawRange.minX, drawRange.maxX, drawRange.minY,
-      drawRange.maxY, relativeX, relativeY);
+  int xRange = drawRange.maxX - drawRange.minX;
+  int yRange = drawRange.maxY - drawRange.minY;
+  drawOffset =
+      clampOffset({roundToInt(relOffset.m_x * xRange) + drawRange.minX,
+                   roundToInt(relOffset.m_y * yRange) + drawRange.minY});
 
-  clampToRange();
+  LOG("OnSize() -- win size:[%d,%d]  x:[%d,%d]  y:[%d,%d]  relPos:[%.3f,%.3f]",
+      GetSize().GetX(), GetSize().GetY(), drawRange.minX, drawRange.maxX,
+      drawRange.minY, drawRange.maxY, relOffset.m_x, relOffset.m_y);
+
   Refresh();
 }
 
@@ -114,42 +133,40 @@ void PaintWindow::OnPaint(wxPaintEvent &evt) {
     gc->SetInterpolationQuality(wxINTERPOLATION_DEFAULT);
   }
 
-  affineDrawer->Draw(gc);
+  drawer->DrawAt(gc, drawOffset);
 
   delete gc;
 }
 
-double PaintWindow::getNewScale(int wheelMovement) {
-  double newScale;
-  if (wheelMovement > 0) {
-    newScale = scale * SCALE_MULT;
-    newScale = std::max(newScale, minScale);
-  } else {
-    newScale = scale / SCALE_MULT;
-    newScale = std::min(newScale, MAX_SCALE);
-  }
-  return newScale;
-}
-
 void PaintWindow::OnMouseWheel(wxMouseEvent &evt) {
   (void)evt;
-  double newScale = getNewScale(evt.GetWheelRotation());
-  wxPoint2DDouble mousePos = evt.GetPosition();
-
-  affineDrawer->transform.Invert();
-  wxPoint2DDouble mousePosOrig = affineDrawer->transform.TransformPoint(mousePos);
-  wxPoint2DDouble newOffset = mousePos - newScale * mousePosOrig;
-  affineDrawer->transform = wxAffineMatrix2D();
-  affineDrawer->transform.Translate(newOffset.m_x, newOffset.m_y);
-  affineDrawer->transform.Scale(newScale, newScale);
-
+  wxPoint mousePos = evt.GetPosition();
+  bool zoomingIn = evt.GetWheelRotation() > 0;
+  double newScale = zoomingIn ? (scale * SCALE_MULT) : (scale / SCALE_MULT);
+  newScale = std::clamp(newScale, minScale, MAX_SCALE);
   LOG("OnMouseWheel() -- scale: %.4f -> %.4f", scale, newScale);
 
+  wxPoint newOffset = mousePos - newScale / scale * (mousePos - drawOffset);
+  drawOffset = clampOffset(newOffset);
+  updateRelOffset();
+
   scale = newScale;
+  drawer->Scale(scale);
   updateMinOffset();
 
-  clampToRange();
+  Refresh();
+}
 
+void PaintWindow::OnMouseMove(wxMouseEvent &evt) {
+  if (!shouldDrag) { return; }
+  wxPoint dragVector = evt.GetPosition() - lastGrabbedOrigin;
+  if (dragVector == wxPoint(0, 0)) { return; }
+  interpolate = false;
+
+  drawOffset = clampOffset(drawOffset + dragVector);
+  updateRelOffset();
+
+  lastGrabbedOrigin = evt.GetPosition();
   Refresh();
 }
 
@@ -158,24 +175,7 @@ void PaintWindow::OnMouseRightDown(wxMouseEvent &evt) {
   shouldZoom = false;
   lastGrabbedOrigin = evt.GetPosition();
   CaptureMouse();
-  LOG("OnMouseRightDown() -- relPos:[%.3f,%.3f]", relativeX, relativeY);
-}
-
-void PaintWindow::OnMouseMove(wxMouseEvent &evt) {
-  if (!shouldDrag) { return; }
-  wxPoint2DDouble dragVector = evt.GetPosition() - lastGrabbedOrigin;
-  if (dragVector == wxPoint2DDouble(0.0, 0.0)) { return; }
-  interpolate = false;
-
-  wxAffineMatrix2D inv = affineDrawer->transform;
-  inv.Invert();
-  dragVector = inv.TransformDistance(dragVector);
-  affineDrawer->transform.Translate(dragVector.m_x, dragVector.m_y);
-
-  clampToRange();
-
-  lastGrabbedOrigin = evt.GetPosition();
-  Refresh();
+  LOG("OnMouseRightDown() -- relPos:[%.3f,%.3f]", relOffset.m_x, relOffset.m_y);
 }
 
 void PaintWindow::OnMouseRightUp(wxMouseEvent &evt) {
@@ -184,7 +184,7 @@ void PaintWindow::OnMouseRightUp(wxMouseEvent &evt) {
   shouldZoom = true;
 
   ReleaseMouse();
-  LOG("OnMouseRightUp() -- relPos:[%.3f,%.3f]", relativeX, relativeY);
+  LOG("OnMouseRightUp() -- relPos:[%.3f,%.3f]", relOffset.m_x, relOffset.m_y);
 
   if (!interpolate) {
     interpolate = true;
@@ -192,40 +192,33 @@ void PaintWindow::OnMouseRightUp(wxMouseEvent &evt) {
   }
 }
 
-void PaintWindow::clampToRange() {
-  auto topLeft = affineDrawer->transform.TransformPoint({0., 0.});
-  auto bottomRight =
-      affineDrawer->transform.TransformPoint({affineDrawer->width, affineDrawer->height});
-  wxPoint2DDouble tr = {0., 0.};
-  if (bottomRight.m_x < drawRange.minX) { tr.m_x = drawRange.minX - bottomRight.m_x; }
-  if (bottomRight.m_y < drawRange.minY) { tr.m_y = drawRange.minY - bottomRight.m_y; }
-  if (topLeft.m_x > drawRange.maxX) { tr.m_x = drawRange.maxX - topLeft.m_x; }
-  if (topLeft.m_y > drawRange.maxY) { tr.m_y = drawRange.maxY - topLeft.m_y; }
-  tr = affineDrawer->transform.TransformDistance(tr);
-  affineDrawer->transform.Translate(tr.m_x, tr.m_y);
+wxPoint PaintWindow::clampOffset(wxPoint offset) {
+  return {std::min(drawRange.maxX, std::max(drawRange.minX, offset.x)),
+          std::min(drawRange.maxY, std::max(drawRange.minY, offset.y))};
 }
 
 void PaintWindow::updateMinOffset() {
-  auto scaledSize = affineDrawer->GetScaledSize();
-  drawRange.minX = MIN_VISIBLE_PIXELS - scaledSize.m_x;
-  drawRange.minY = MIN_VISIBLE_PIXELS - scaledSize.m_y;
+  auto scaledSize = drawer->GetScaledSize();
+  drawRange.minX = MIN_VISIBLE_PIXELS - scaledSize.GetX();
+  drawRange.minY = MIN_VISIBLE_PIXELS - scaledSize.GetY();
   logRange(drawRange);
 }
 
 void PaintWindow::updateMaxOffset() {
-  drawRange.maxX = GetSize().GetX() - MIN_VISIBLE_PIXELS;
-  drawRange.maxY = GetSize().GetY() - MIN_VISIBLE_PIXELS;
+  auto winSize = this->GetSize();
+  drawRange.maxX = winSize.GetX() - MIN_VISIBLE_PIXELS;
+  drawRange.maxY = winSize.GetY() - MIN_VISIBLE_PIXELS;
   logRange(drawRange);
 }
 
-void logMatrix(const wxAffineMatrix2D &m, wxString name) {
-  wxMatrix2D lin;
-  wxPoint2DDouble tr;
-  m.Get(&lin, &tr);
-  LOG("%s: [[%.2f, %.2f], [%.2f, %.2f]] [%.2f, %.2f]", name, lin.m_11, lin.m_12, lin.m_21,
-      lin.m_22, tr.m_x, tr.m_y);
+void PaintWindow::updateRelOffset() {
+  double relX =
+      Ratio(drawOffset.x - drawRange.minX, drawRange.maxX - drawRange.minX);
+  double relY =
+      Ratio(drawOffset.y - drawRange.minY, drawRange.maxY - drawRange.minY);
+  relOffset = {relX, relY};
 }
 
 void logRange(OffsetRange r) {
-  LOG("Offset Range -- x: [%.1f,%.1f]  y: [%.1f,%.1f]", r.minX, r.maxX, r.minY, r.maxY);
+  LOG("Offset Range -- x: [%d,%d]  y: [%d,%d]", r.minX, r.maxX, r.minY, r.maxY);
 }

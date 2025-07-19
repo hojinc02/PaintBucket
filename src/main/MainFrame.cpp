@@ -83,16 +83,16 @@ void MainFrame::OnLoadButton(wxCommandEvent &evt) {
     return;
   }
 
-  if (auto pw = dynamic_cast<PaintWindow *>(paintWindow)) {
-    pw->Reset();
-  } else {
+  PaintWindow *pw = nullptr;
+  if (!(pw = dynamic_cast<PaintWindow *>(paintWindow))) {
     bagSizer->Detach(paintWindow);
     paintWindow->Destroy();
     paintWindow = new PaintWindow(mainPanel);
     bagSizer->Add(paintWindow, pwGBDetails.pos, pwGBDetails.span, wxEXPAND);
   }
 
-  auto pw = dynamic_cast<PaintWindow *>(paintWindow);
+  pw = dynamic_cast<PaintWindow *>(paintWindow);
+  pw->Reset();
   pw->SetImage(img);
 
   mainPanel->Layout();

@@ -3,13 +3,13 @@
 
 #include "wx/wx.h"
 
-#include "AffineImage.h"
+#include "ScaledImageDrawer.h"
 
 struct OffsetRange {
-  double minX;
-  double maxX;
-  double minY;
-  double maxY;
+  int minX;
+  int maxX;
+  int minY;
+  int maxY;
 };
 
 class PaintWindow : public wxWindow {
@@ -23,26 +23,26 @@ class PaintWindow : public wxWindow {
 
   void updateMinOffset();
   void updateMaxOffset();
-  void clampToRange();
-  double getNewScale(int wheelMovement);
+  void updateRelOffset();
+  wxPoint clampOffset(wxPoint offset);
 
   const int MIN_VISIBLE_PIXELS = FromDIP(60);
   const int MIN_LENGTH = FromDIP(60);
-  static constexpr double MAX_SCALE =
-      40.0;  // scale is scaledLength:originalLength
   static constexpr double SCALE_MULT = 1.15;
   static constexpr double INTERPOLATION_THRESHOLD = 5.8;
+  static constexpr double MAX_SCALE = 50.0;
 
   double scale;     // current scale
   double minScale;  // updated on load
 
-  AffineImage *affineDrawer = nullptr;
+  ScaledImageDrawer *drawer = nullptr;
 
   OffsetRange drawRange;
 
-  wxPoint2DDouble lastGrabbedOrigin;
-  double relativeX;
-  double relativeY;
+  wxPoint drawOffset;
+  wxPoint lastGrabbedOrigin;
+  wxPoint2DDouble relOffset;
+
   bool interpolate;
   bool shouldDrag;
   bool shouldZoom;
