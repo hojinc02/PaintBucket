@@ -28,7 +28,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/runtime")
 option(BUILD_SHARED_LIBS "Build with shared/dynamic libraries" OFF)
 
 # Main exe
-add_executable(${CMAKE_PROJECT_NAME})
+add_executable(${CMAKE_PROJECT_NAME} WIN32)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
     DEBUG_POSTFIX ${CMAKE_DEBUG_POSTFIX})
 
